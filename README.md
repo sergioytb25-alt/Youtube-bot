@@ -2,7 +2,11 @@
 
 Ce bot surveille :
 - une chaîne YouTube (via son flux RSS) -> envoie un message Discord à chaque nouvelle vidéo,
-- une chaîne Twitch (via l'API Helix) -> envoie un message Discord quand le channel passe en live.
+- une ou plusieurs chaînes Twitch (via l'API Helix) -> envoie un message Discord quand le channel passe en live.
+
+Support Twitch
+- Tu peux surveiller plusieurs comptes Twitch en renseignant l'option `TWITCH_USER_LOGINS` dans le fichier `.env`.
+  Exemple: `TWITCH_USER_LOGINS=user1,user2,autrecompte`
 
 Installation rapide
 1. Copier les fichiers dans le repo (index.js, package.json déjà présent, etc.).
@@ -27,4 +31,5 @@ Exécution en production
 
 Notes
 - YouTube: utilisation du flux RSS (pas besoin d'API key).
-- Twitch: le bot utilise le flux "streams" via un token application (client credentials). Si tu veux vérifier plusieurs utilisateurs, adapte `checkTwitch` pour itérer plusieurs user_login.
+- Twitch: le bot utilise le flux "streams" via un token application (client credentials). Le bot récupère un token d'application et le met en cache en mémoire pendant sa durée de vie pour réduire les appels.
+- Pour obtenir des notifications instantanées et scalables, je peux implémenter Twitch EventSub (nécessite une URL publique pour les callbacks).

@@ -9,7 +9,8 @@ const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const YT_CHANNEL_ID = process.env.YOUTUBE_CHANNEL_ID;
 const TWITCH_CLIENT_ID = process.env.TWITCH_CLIENT_ID;
 const TWITCH_CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET;
-const TWITCH_USER_LOGIN = process.env.TWITCH_USER_LOGIN;
+// Support multiple Twitch logins (comma separated) e.g. "user1,user2"
+const TWITCH_USER_LOGINS = process.env.TWITCH_USER_LOGINS; 
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '60000', 10); // default 60s
 
 if (!WEBHOOK_URL) {
@@ -19,7 +20,7 @@ if (!WEBHOOK_URL) {
 
 const DATA_FILE = path.join(__dirname, 'data.json');
 
-let data = { lastVideoId: null, twitchLive: false, twitchStreamId: null };
+let data = { lastVideoId: null, twitch: {} }; // twitch: { login: { live: bool, streamId: string|null } }
 try {
   if (fs.existsSync(DATA_FILE)) {
     data = Object.assign(data, JSON.parse(fs.readFileSync(DATA_FILE, 'utf8') || '{}'));
@@ -43,7 +44,7 @@ async function sendDiscord(content, embed) {
     await axios.post(WEBHOOK_URL, body);
     console.log('Webhook envoyé :', content.replace(/\n/g, ' | ').slice(0, 120));
   } catch (e) {
-    console.error('Échec envoi webhook:', e.message);
+    console.error('Échec envoi webhook:', e.response?.data || e.message);
   }
 }
 
@@ -78,15 +79,21 @@ async function checkYouTube() {
       await sendDiscord(msg, embed);
       data.lastVideoId = videoId;
       saveData();
-    } else {
-      // no new video
     }
   } catch (e) {
-    console.error('Erreur checkYouTube:', e.message);
+    console.error('Erreur checkYouTube:', e.response?.data || e.message);
   }
 }
 
+// Twitch token cache in memory
+let twitchToken = null;
+let twitchTokenExpiresAt = 0;
+
 async function getTwitchAppToken() {
+  const now = Date.now();
+  if (twitchToken && now < twitchTokenExpiresAt - 5000) {
+    return twitchToken; // cached
+  }
   const url = `https://id.twitch.tv/oauth2/token`;
   try {
     const resp = await axios.post(url, null, {
@@ -97,56 +104,78 @@ async function getTwitchAppToken() {
       },
       timeout: 15000
     });
-    return resp.data.access_token;
+    twitchToken = resp.data.access_token;
+    const expiresIn = resp.data.expires_in || 0;
+    twitchTokenExpiresAt = Date.now() + expiresIn * 1000;
+    return twitchToken;
   } catch (e) {
     throw new Error('Erreur obtention Twitch token: ' + (e.response?.data?.message || e.message));
   }
 }
 
 async function checkTwitch() {
-  if (!TWITCH_CLIENT_ID || !TWITCH_CLIENT_SECRET || !TWITCH_USER_LOGIN) {
-    console.log('Twitch non configuré (TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET/TWITCH_USER_LOGIN) — skip Twitch');
+  if (!TWITCH_CLIENT_ID || !TWITCH_CLIENT_SECRET || !TWITCH_USER_LOGINS) {
+    console.log('Twitch non configuré (TWITCH_CLIENT_ID/TWITCH_CLIENT_SECRET/TWITCH_USER_LOGINS) — skip Twitch');
     return;
   }
+  const logins = TWITCH_USER_LOGINS.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  if (logins.length === 0) return;
+
   try {
     const token = await getTwitchAppToken();
-    const resp = await axios.get('https://api.twitch.tv/helix/streams', {
-      params: { user_login: TWITCH_USER_LOGIN },
+    // build query string with repeated user_login params
+    const params = new URLSearchParams();
+    for (const l of logins) params.append('user_login', l);
+    const url = `https://api.twitch.tv/helix/streams?${params.toString()}`;
+
+    const resp = await axios.get(url, {
       headers: {
         'Client-Id': TWITCH_CLIENT_ID,
         'Authorization': `Bearer ${token}`
       },
       timeout: 15000
     });
-    const stream = resp.data && resp.data.data && resp.data.data[0];
-    if (stream && !data.twitchLive) {
-      // went live
-      const title = stream.title || 'Live';
-      const game = stream.game_name || '';
-      const viewers = stream.viewer_count || 0;
-      const url = `https://twitch.tv/${TWITCH_USER_LOGIN}`;
-      const msg = `🔴 ${TWITCH_USER_LOGIN} est en direct sur Twitch : **${title}** ${game ? `- ${game}` : ''}\n${url} — ${viewers} viewers`;
-      const embed = { title, url, description: `Viewers: ${viewers}`, footer: { text: 'Twitch' } };
-      await sendDiscord(msg, embed);
-      data.twitchLive = true;
-      data.twitchStreamId = stream.id;
-      saveData();
-    } else if (!stream && data.twitchLive) {
-      // stream ended
-      console.log(`${TWITCH_USER_LOGIN} est offiline maintenant.`);
-      data.twitchLive = false;
-      data.twitchStreamId = null;
-      saveData();
-    } else {
-      // no change
+
+    const streams = resp.data && resp.data.data ? resp.data.data : [];
+    // map login -> stream
+    const liveByLogin = {};
+    for (const s of streams) {
+      if (s.user_login) liveByLogin[s.user_login.toLowerCase()] = s;
     }
+
+    for (const login of logins) {
+      const stream = liveByLogin[login];
+      const prev = data.twitch[login] || { live: false, streamId: null };
+
+      if (stream && !prev.live) {
+        // went live
+        const title = stream.title || 'Live';
+        const game = stream.game_name || '';
+        const viewers = stream.viewer_count || 0;
+        const url = `https://twitch.tv/${login}`;
+        const msg = `🔴 ${login} est en direct sur Twitch : **${title}** ${game ? `- ${game}` : ''}\n${url} — ${viewers} viewers`;
+        const embed = { title, url, description: `Viewers: ${viewers}`, footer: { text: 'Twitch' } };
+        await sendDiscord(msg, embed);
+        data.twitch[login] = { live: true, streamId: stream.id };
+        saveData();
+      } else if (!stream && prev.live) {
+        // went offline
+        console.log(`${login} est offline maintenant.`);
+        data.twitch[login] = { live: false, streamId: null };
+        saveData();
+      } else if (!data.twitch[login]) {
+        // initialize state
+        data.twitch[login] = prev;
+      }
+    }
+
   } catch (e) {
-    console.error('Erreur checkTwitch:', e.message);
+    console.error('Erreur checkTwitch:', e.response?.data || e.message);
   }
 }
 
 async function main() {
-  console.log('Démarrage du bot YouTube/Twitch pinger');
+  console.log('Démarrage du bot YouTube/Twitch pinger (support multi-Twitch)');
   await checkYouTube();
   await checkTwitch();
 
