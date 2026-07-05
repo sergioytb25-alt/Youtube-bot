@@ -11,7 +11,7 @@ import time
 import json
 import requests
 import feedparser
-from typing import Optional
+from typing import Optional, List
 
 try:
     from dotenv import load_dotenv
@@ -21,7 +21,10 @@ except Exception:
     pass
 
 WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL')
+# Backwards-compatible: single or multiple YouTube channel IDs
 YT_CHANNEL_ID = os.getenv('YOUTUBE_CHANNEL_ID')
+YT_CHANNEL_IDS = os.getenv('YOUTUBE_CHANNEL_IDS', '')  # comma separated
+
 TWITCH_CLIENT_ID = os.getenv('TWITCH_CLIENT_ID')
 TWITCH_CLIENT_SECRET = os.getenv('TWITCH_CLIENT_SECRET')
 TWITCH_USER_LOGINS = os.getenv('TWITCH_USER_LOGINS', '')  # comma separated
@@ -34,14 +37,16 @@ if not WEBHOOK_URL:
 DATA_FILE = os.path.join(os.path.dirname(__file__), 'data.json')
 
 # état persisted
-data = { 'lastVideoId': None, 'twitch': {} }
+data = { 'youtube': {}, 'twitch': {} }
 
 if os.path.exists(DATA_FILE):
     try:
         with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            data = { **data, **json.load(f) }
+            existing = json.load(f)
+            # merge to keep backward compatibility
+            data = { **data, **existing }
     except Exception as e:
-        print('Impossible de lire data.json, création d\'un nouveau:', e)
+        print("Impossible de lire data.json, création d'un nouveau:", e)
 
 
 def save_data():
@@ -61,43 +66,73 @@ def send_discord(content: str, embed: Optional[dict] = None):
         r.raise_for_status()
         print('Webhook envoyé :', content.replace('\n', ' | ')[:120])
     except Exception as e:
-        print('Échec envoi webhook:', getattr(e, 'response', str(e)))
+        # show response if available
+        resp = getattr(e, 'response', None)
+        print('Échec envoi webhook:', getattr(resp, 'text', str(e)))
 
 
-# -------- YouTube --------
+# -------- YouTube (support multiple channels) --------
+
+def _normalize_channel_list(single: Optional[str], multi: str) -> List[str]:
+    ids = []
+    if single and single.strip():
+        ids.append(single.strip())
+    if multi:
+        for s in multi.split(','):
+            s2 = s.strip()
+            if s2:
+                ids.append(s2)
+    # remove duplicates while preserving order
+    seen = set()
+    out = []
+    for i in ids:
+        if i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out
+
 
 def check_youtube():
-    if not YT_CHANNEL_ID:
-        print('YOUTUBE_CHANNEL_ID non défini — skip YouTube')
+    channel_ids = _normalize_channel_list(YT_CHANNEL_ID, YT_CHANNEL_IDS)
+    if not channel_ids:
+        print('Aucun YOUTUBE_CHANNEL_ID ni YOUTUBE_CHANNEL_IDS défini — skip YouTube')
         return
-    try:
-        url = f'https://www.youtube.com/feeds/videos.xml?channel_id={YT_CHANNEL_ID}'
-        feed = feedparser.parse(url)
-        if not feed.entries:
-            print('Aucune entrée RSS YouTube trouvée')
-            return
-        entry = feed.entries[0]
-        link = entry.get('link', '')
-        # video id from link e.g. https://www.youtube.com/watch?v=VIDEOID or https://youtu.be/VIDEOID
-        video_id = None
-        if 'watch?v=' in link:
-            video_id = link.split('watch?v=')[-1].split('&')[0]
-        else:
-            video_id = link.rstrip('/').split('/')[-1]
-        title = entry.get('title', 'Nouvelle vidéo')
-        published = entry.get('published', '')
 
-        if data.get('lastVideoId') != video_id:
-            msg = f"🎬 Nouvelle vidéo : **{title}**\n{link}\nPublié: {published or 'unknown'}"
-            embed = { 'title': title, 'url': link, 'timestamp': published, 'footer': { 'text': 'YouTube' } }
-            send_discord(msg, embed)
-            data['lastVideoId'] = video_id
-            save_data()
-        else:
-            # pas de nouvelle vidéo
-            pass
-    except Exception as e:
-        print('Erreur check_youtube:', e)
+    for channel_id in channel_ids:
+        try:
+            url = f'https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}'
+            feed = feedparser.parse(url)
+            if not feed.entries:
+                print(f'Aucune entrée RSS pour {channel_id}')
+                continue
+            entry = feed.entries[0]
+            link = entry.get('link', '')
+            # video id from link e.g. https://www.youtube.com/watch?v=VIDEOID or https://youtu.be/VIDEOID
+            video_id = None
+            if 'watch?v=' in link:
+                video_id = link.split('watch?v=')[-1].split('&')[0]
+            else:
+                video_id = link.rstrip('/').split('/')[-1]
+            title = entry.get('title', 'Nouvelle vidéo')
+            published = entry.get('published', '')
+            # try to get author/channel name
+            channel_name = entry.get('author') or channel_id
+
+            prev_vid = data.get('youtube', {}).get(channel_id)
+            if prev_vid != video_id:
+                # message format requested by user:
+                # @everyone {user.name} VIENT JUSTE DE METTRE UNE VIDÉO EN LIGNE !!!! :Malin:  {url}
+                content = f"@everyone {channel_name} VIENT JUSTE DE METTRE UNE VIDÉO EN LIGNE !!!! :Malin:  {link}"
+                # send without embed (the user asked specific text), but also include embed for preview
+                embed = { 'title': title, 'url': link, 'timestamp': published, 'footer': { 'text': f'YouTube - {channel_name}' } }
+                send_discord(content, embed)
+                data.setdefault('youtube', {})[channel_id] = video_id
+                save_data()
+            else:
+                # pas de nouvelle vidéo pour ce channel
+                pass
+        except Exception as e:
+            print(f'Erreur check_youtube pour {channel_id}:', e)
 
 
 # -------- Twitch --------
@@ -153,13 +188,16 @@ def check_twitch():
             prev = data.get('twitch', {}).get(login, { 'live': False, 'streamId': None })
             if stream and not prev.get('live'):
                 # went live
+                # get display name if available
+                display = stream.get('user_name') or stream.get('user_login') or login
                 title = stream.get('title', 'Live')
-                game = stream.get('game_name', '')
-                viewers = stream.get('viewer_count', 0)
                 url = f'https://twitch.tv/{login}'
-                msg = f"🔴 {login} est en direct sur Twitch : **{title}** {('- ' + game) if game else ''}\n{url} — {viewers} viewers"
-                embed = { 'title': title, 'url': url, 'description': f'Viewers: {viewers}', 'footer': { 'text': 'Twitch' } }
-                send_discord(msg, embed)
+                # message format requested by user:
+                # @Notif. Live@Notif. Twitch {user.name} est en live sur Twitch ici : {url}
+                # We'll send the literal prefixes as the user specified.
+                content = f"@Notif. Live@Notif. Twitch {display} est en live sur Twitch ici : {url}"
+                embed = { 'title': title, 'url': url, 'description': f"Stream par {display}", 'footer': { 'text': 'Twitch' } }
+                send_discord(content, embed)
                 data.setdefault('twitch', {})[login] = { 'live': True, 'streamId': stream.get('id') }
                 save_data()
             elif not stream and prev.get('live'):
