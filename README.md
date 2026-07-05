@@ -1,35 +1,37 @@
-# YouTube & Twitch pinger (Discord)
+# YouTube & Twitch pinger (Discord) - Python version
 
-Ce bot surveille :
-- une chaîne YouTube (via son flux RSS) -> envoie un message Discord à chaque nouvelle vidéo,
-- une ou plusieurs chaînes Twitch (via l'API Helix) -> envoie un message Discord quand le channel passe en live.
+Ce repo contient désormais une implémentation Python du bot qui :
+- surveille une chaîne YouTube via son flux RSS et envoie un message Discord à chaque nouvelle vidéo,
+- surveille une ou plusieurs chaînes Twitch (liste séparée par des virgules) via l'API Helix et envoie un message Discord quand un channel passe en live.
 
-Support Twitch
-- Tu peux surveiller plusieurs comptes Twitch en renseignant l'option `TWITCH_USER_LOGINS` dans le fichier `.env`.
-  Exemple: `TWITCH_USER_LOGINS=user1,user2,autrecompte`
+Fichiers principaux
+- bot.py : script principal (Python)
+- requirements.txt : dépendances Python (requests, python-dotenv, feedparser)
+- .env.example : exemple de configuration
+- data.json : fichier persistant pour éviter les doublons de notifications
 
-Installation rapide
-1. Copier les fichiers dans le repo (index.js, package.json déjà présent, etc.).
-2. Créer un webhook Discord et récupérer l'URL.
-3. Récupérer l'ID de la chaîne YouTube (format UC...).
-4. Créer une application Twitch pour obtenir `client_id` et `client_secret` (Developer Console).
-5. Créer un fichier `.env` à la racine en copiant `.env.example` et en remplissant les valeurs.
-6. Installer les dépendances :
+Installation
+1. Crée un environnement virtuel (optionnel):
+   python3 -m venv venv
+   source venv/bin/activate
 
-```
-npm install
-```
-7. Lancer :
+2. Installer les dépendances:
+   pip install -r requirements.txt
 
-```
-node index.js
-```
+3. Copier `.env.example` en `.env` et remplir les clés:
+   - DISCORD_WEBHOOK_URL
+   - TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET
+   - TWITCH_USER_LOGINS (ex: user1,user2)
+   - (optionnel) YOUTUBE_CHANNEL_ID
 
-Exécution en production
-- Utilise PM2, systemd ou Docker (Dockerfile fourni) pour garder le process actif.
-- Ajuste `POLL_INTERVAL_MS` si tu veux moins/more de polling (en ms).
+4. Lancer:
+   python3 bot.py
+
+Docker
+- Un Dockerfile est inclus pour exécuter le bot en conteneur (image python:3.11-slim). Exemple:
+  docker build -t yt-pinger-py .
+  docker run -d --env-file .env --name yt-pinger-py yt-pinger-py
 
 Notes
-- YouTube: utilisation du flux RSS (pas besoin d'API key).
-- Twitch: le bot utilise le flux "streams" via un token application (client credentials). Le bot récupère un token d'application et le met en cache en mémoire pendant sa durée de vie pour réduire les appels.
-- Pour obtenir des notifications instantanées et scalables, je peux implémenter Twitch EventSub (nécessite une URL publique pour les callbacks).
+- Polling: évite d'abaisser POLL_INTERVAL_MS en dessous de 30–60s pour respecter les limites d'API.
+- Pour notifications instantanées et scalables, on peut basculer vers Twitch EventSub (webhooks) et PubSub/Push pour YouTube; cela nécessite une URL publique HTTPS.

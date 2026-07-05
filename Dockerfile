@@ -1,7 +1,7 @@
-FROM node:18-alpine
+FROM python:3.11-slim
 WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm ci --only=production
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-ENV NODE_ENV=production
-CMD ["node", "index.js"]
+ENV PYTHONUNBUFFERED=1
+CMD ["python3", "bot.py"]

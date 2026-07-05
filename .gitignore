@@ -1,3 +1,5 @@
-node_modules/
+# Ignored files
 .env
 data.json
+venv/
+__pycache__/
